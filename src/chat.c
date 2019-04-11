@@ -79,6 +79,8 @@ int start_server(void)
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if(server_socket < 0)
     {
+        close(lockfile);
+        unlink(CHAT_LOCKFILE_PATH);
         perror("Server socket creation issue\n");
         return -1;
     }
@@ -90,12 +92,16 @@ int start_server(void)
     if(bind(server_socket, (struct sockaddr *) &server_addr,
             sizeof(server_addr)) < 0)
     {
+        close(lockfile);
+        unlink(CHAT_LOCKFILE_PATH);
         perror("Error binding socket to local interface\n");
         return -1;
     }
 
     if(listen(server_socket, MAX_PENDING_CONNS))
     {
+        close(lockfile);
+        unlink(CHAT_LOCKFILE_PATH);
         perror("Could set server's listening socket to passive state\n");
         return -1;
     }
@@ -136,14 +142,10 @@ int start_server(void)
         pthread_detach(*(thread_id + count - 1));
     }
 
-    if(close(connection_socket))
-    {
-        return -1;
-    }
-    if(close(server_socket))
-    {
-        return -1;
-    }
+    close(lockfile);
+    unlink(CHAT_LOCKFILE_PATH);
+    close(connection_socket);
+    close(server_socket);
     return 0;
 };
 
@@ -151,7 +153,8 @@ void *handle_user(void *n)
 {
     struct pollfd pfd;
     ssize_t       bytes_read, bytes_sent;
-    char          message_buffer[MAX_MESSAGE_LENGTH];
+    char          message_buffer[MAX_MESSAGE_LENGTH - (USERNAME_STRLEN + 2)];
+    char          message_to_clients[MAX_MESSAGE_LENGTH];
     unsigned char i, num;
 
     num = *((unsigned char *) n);
@@ -175,7 +178,8 @@ void *handle_user(void *n)
             {
                 pthread_mutex_lock(&mut);
                 bytes_read = recv(connected_clients[num].sock, message_buffer,
-                                  MAX_MESSAGE_LENGTH, 0);
+                                  MAX_MESSAGE_LENGTH - (USERNAME_STRLEN + 2),
+                                  0);
                 if(bytes_read <= 0)
                 {
                     close(connected_clients[num].sock);
@@ -185,8 +189,10 @@ void *handle_user(void *n)
                 }
                 pthread_mutex_unlock(&mut);
 
-                printf("Message from user %s:\n%s\n",
-                       connected_clients[num].username, message_buffer);
+                memset(message_to_clients, '\0', MAX_MESSAGE_LENGTH);
+                strcat(message_to_clients, connected_clients[num].username);
+                strcat(message_to_clients, ": ");
+                strcat(message_to_clients, message_buffer);
 
                 pthread_mutex_lock(&mut);
                 for(i = 0; i < count; ++i)
@@ -195,10 +201,12 @@ void *handle_user(void *n)
                     {
                         continue;
                     }
-                    bytes_sent = send(connected_clients[i].sock, message_buffer,
-                                      MAX_MESSAGE_LENGTH, 0);
+                    bytes_sent = send(connected_clients[i].sock,
+                                      message_to_clients, MAX_MESSAGE_LENGTH,
+                                      0);
                 }
                 pthread_mutex_unlock(&mut);
+                memset(message_buffer, '\0', MAX_MESSAGE_LENGTH - (USERNAME_STRLEN + 2));
             }
         }
     }
@@ -268,7 +276,7 @@ int start_client(void)
     int                connection_socket;
     char               username[USERNAME_STRLEN];
     char               server_addr_str[IP_ADDR_STRLEN];
-    char               message_buffer[MAX_MESSAGE_LENGTH];
+    char               message_buffer[MAX_MESSAGE_LENGTH - (USERNAME_STRLEN + 2)];
 
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(6776);
@@ -309,7 +317,7 @@ int start_client(void)
     pfd.fd = connection_socket;
     pfd.events = POLLOUT;
 
-    message_len = MAX_MESSAGE_LENGTH;
+    message_len = MAX_MESSAGE_LENGTH - (USERNAME_STRLEN + 2);
 
     pthread_create(&thread_id, NULL, handle_server, &connection_socket);
     pthread_detach(thread_id);
@@ -318,12 +326,14 @@ int start_client(void)
     {
         fgets(message_buffer, message_len, stdin);
 
-        if(!strncmp(message_buffer, DISCONNECT_CMD, MAX_MESSAGE_LENGTH))
+        if(!strncmp(message_buffer, DISCONNECT_CMD,
+                    MAX_MESSAGE_LENGTH - (USERNAME_STRLEN + 2)))
         {
             close(connection_socket);
             break;
         }
-        if(!strncmp(message_buffer, QUIT_CMD, MAX_MESSAGE_LENGTH))
+        if(!strncmp(message_buffer, QUIT_CMD,
+                    MAX_MESSAGE_LENGTH - (USERNAME_STRLEN + 2)))
         {
             close(connection_socket);
             exit(0);
